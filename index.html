@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TIF 轉 JPG 小工具</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1f2328; --mute:#6b7280; --line:#e5e3dd; --accent:#2f6fde; --ok:#1a7f4b; --bad:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16181c; --card:#1f2228; --ink:#e8e6e3; --mute:#9aa0a8; --line:#30343b; --accent:#6aa0ff; --ok:#4cc38a; --bad:#ff8a5c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family: -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif; line-height:1.6; }
+  main { max-width:760px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  .sub { color:var(--mute); margin:0 0 22px; }
+  #drop { border:2px dashed var(--line); background:var(--card); border-radius:16px; padding:38px 18px;
+    text-align:center; cursor:pointer; transition:.15s; }
+  #drop.over { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 8%, var(--card)); }
+  #drop b { display:block; font-size:1.15rem; margin-bottom:6px; }
+  #drop span { color:var(--mute); font-size:.92rem; }
+  .opts { display:flex; flex-wrap:wrap; gap:14px 22px; margin:18px 2px; font-size:.95rem; }
+  .opts label { display:flex; align-items:center; gap:8px; }
+  select, input[type=range] { accent-color:var(--accent); }
+  select { padding:4px 6px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; }
+  #status { margin:16px 2px; font-size:.95rem; min-height:1.5em; }
+  .bar { height:8px; background:var(--line); border-radius:99px; overflow:hidden; margin-top:8px; display:none; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .btn { appearance:none; border:0; border-radius:10px; padding:11px 18px; font:inherit; font-weight:600;
+    background:var(--accent); color:#fff; cursor:pointer; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); padding:6px 10px; font-weight:500; font-size:.85rem; }
+  #actions { display:none; gap:10px; flex-wrap:wrap; margin:6px 0 18px; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:12px; }
+  .item { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column; }
+  .item img { width:100%; aspect-ratio:4/3; object-fit:cover; background:var(--line); display:block; }
+  .item .meta { padding:8px 10px; font-size:.8rem; display:flex; flex-direction:column; gap:6px; }
+  .item .name { word-break:break-all; }
+  .item .size { color:var(--mute); }
+  .err { color:var(--bad); }
+  .okc { color:var(--ok); }
+  footer { color:var(--mute); font-size:.85rem; margin-top:30px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TIF 轉 JPG 小工具</h1>
+  <p class="sub">把壓縮檔（.zip）或 TIF 檔丟進來，自動轉成手機能看的 JPG。全程在你的瀏覽器裡處理，檔案不會上傳。</p>
+
+  <div id="drop" tabindex="0">
+    <b>📦 把檔案拖到這裡，或點一下選擇檔案</b>
+    <span>支援 .zip 壓縮檔，或直接選多個 .tif / .tiff</span>
+    <input id="file" type="file" accept=".zip,.tif,.tiff,application/zip,image/tiff" multiple hidden>
+  </div>
+
+  <div class="opts">
+    <label>尺寸
+      <select id="maxSize">
+        <option value="1920">長邊 1920px（較小）</option>
+        <option value="2560" selected>長邊 2560px（建議）</option>
+        <option value="4000">長邊 4000px（較大）</option>
+        <option value="0">原尺寸</option>
+      </select>
+    </label>
+    <label>畫質 <input id="quality" type="range" min="60" max="95" value="88"> <span id="qv">88</span></label>
+  </div>
+
+  <div id="status"></div>
+  <div class="bar" id="bar"><i></i></div>
+
+  <div id="actions">
+    <button class="btn" id="dlZip">⬇️ 全部下載（zip）</button>
+  </div>
+  <div id="grid"></div>
+
+  <footer>小提醒：檔案很大或張數很多時，處理會比較久，請讓頁面保持開啟。</footer>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const drop = $("drop"), fileIn = $("file"), status = $("status"), bar = $("bar"), barI = bar.querySelector("i");
+  const grid = $("grid"), actions = $("actions"), dlZip = $("dlZip");
+  $("quality").oninput = e => $("qv").textContent = e.target.value;
+
+  let results = [];          // {path, blob}
+  let downloads = null;
+  let downloadsReady = false;
+  if (window.claude && claude.use) {
+    claude.use("downloads").then(d => { downloads = d; downloadsReady = true; }).catch(() => { downloadsReady = true; });
+  }
+
+  // ---------- 拖放 / 選擇 ----------
+  drop.onclick = () => fileIn.click();
+  drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") fileIn.click(); };
+  ["dragenter","dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave","drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => handle([...e.dataTransfer.files]));
+  fileIn.onchange = () => { handle([...fileIn.files]); fileIn.value = ""; };
+
+  const isTif = n => /\.tiff?$/i.test(n) && !/(^|\/)\._/.test(n) && !/__MACOSX\//.test(n);
+
+  // 中文壓縮檔名：先試 UTF-8，不行再試 Big5、GBK
+  function decodeName(bytes) {
+    for (const enc of ["utf-8", "big5", "gbk"]) {
+      try { return new TextDecoder(enc, { fatal: true }).decode(bytes); } catch (_) {}
+    }
+    return new TextDecoder("latin1").decode(bytes);
+  }
+
+  function setStatus(html, cls) { status.innerHTML = html; status.className = cls || ""; }
+  function setProgress(done, total) {
+    bar.style.display = total ? "block" : "none";
+    barI.style.width = total ? (done / total * 100) + "%" : "0";
+  }
+  const fmt = b => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.round(b / 1024) + " KB";
+  const tick = () => new Promise(r => setTimeout(r, 0));
+
+  // ---------- 主流程 ----------
+  async function handle(files) {
+    if (!files.length) return;
+    results = []; grid.innerHTML = ""; actions.style.display = "none";
+    setStatus("讀取檔案中…");
+
+    // 收集所有 TIF：{path, getBuffer}
+    const jobs = [];
+    try {
+      for (const f of files) {
+        if (/\.zip$/i.test(f.name)) {
+          const zip = await JSZip.loadAsync(f, { decodeFileName: decodeName });
+          zip.forEach((path, entry) => {
+            if (!entry.dir && isTif(path)) jobs.push({ path, get: () => entry.async("arraybuffer") });
+          });
+        } else if (isTif(f.name)) {
+          jobs.push({ path: f.name, get: () => f.arrayBuffer() });
+        }
+      }
+    } catch (e) {
+      setStatus("壓縮檔打不開：" + e.message + "（目前只支援 .zip，.rar / .7z 請先解壓縮）", "err");
+      return;
+    }
+
+    if (!jobs.length) {
+      setStatus("找不到 TIF 檔。請確認壓縮檔裡有 .tif 或 .tiff。如果是 .rar / .7z，請先解壓縮再把 TIF 丟進來。", "err");
+      return;
+    }
+
+    const maxSize = +$("maxSize").value, q = +$("quality").value / 100;
+    let fail = 0;
+    for (let i = 0; i < jobs.length; i++) {
+      const job = jobs[i];
+      setStatus(`轉換中 ${i + 1} / ${jobs.length}：${escapeHtml(job.path)}`);
+      setProgress(i, jobs.length);
+      await tick();
+      try {
+        const buf = await job.get();
+        const pages = await convertTif(buf, maxSize, q);
+        const base = job.path.replace(/\.tiff?$/i, "");
+        pages.forEach((blob, k) => {
+          const path = pages.length > 1 ? `${base}_p${k + 1}.jpg` : `${base}.jpg`;
+          results.push({ path, blob });
+          addCard(path, blob);
+        });
+      } catch (e) {
+        fail++;
+        addErrorCard(job.path, e.message || String(e));
+      }
+    }
+    setProgress(0, 0);
+    const ok = results.length;
+    setStatus(`✅ 完成！共轉出 ${ok} 張 JPG` + (fail ? `，<span class="err">${fail} 個檔案失敗</span>` : ""), ok ? "okc" : "err");
+    if (ok) actions.style.display = "flex";
+  }
+
+  // ---------- TIF 解碼 + 轉 JPG ----------
+  async function convertTif(buf, maxSize, q) {
+    const ifds = UTIF.decode(buf);
+    // 略過縮圖頁（NewSubfileType 第 1 位元 = 縮小版）
+    let pages = ifds.filter(d => !(d.t254 && (d.t254[0] & 1)));
+    if (!pages.length) pages = ifds;
+    const out = [];
+    for (const ifd of pages) {
+      UTIF.decodeImage(buf, ifd, ifds);
+      const w = ifd.width, h = ifd.height;
+      if (!w || !h) continue;
+      const rgba = new Uint8ClampedArray(UTIF.toRGBA8(ifd).buffer);
+      ifd.data = null; // 釋放記憶體
+
+      const src = document.createElement("canvas");
+      src.width = w; src.height = h;
+      src.getContext("2d").putImageData(new ImageData(rgba, w, h), 0, 0);
+
+      let scale = 1;
+      if (maxSize && Math.max(w, h) > maxSize) scale = maxSize / Math.max(w, h);
+      const dw = Math.round(w * scale), dh = Math.round(h * scale);
+
+      // 依 TIFF 方向標記轉正（常見的 3/6/8）
+      const ori = ifd.t274 ? ifd.t274[0] : 1;
+      const swap = ori === 6 || ori === 8;
+      const dst = document.createElement("canvas");
+      dst.width = swap ? dh : dw; dst.height = swap ? dw : dh;
+      const ctx = dst.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, dst.width, dst.height); // 透明處補白底
+      ctx.imageSmoothingQuality = "high";
+      ctx.translate(dst.width / 2, dst.height / 2);
+      if (ori === 3) ctx.rotate(Math.PI);
+      else if (ori === 6) ctx.rotate(Math.PI / 2);
+      else if (ori === 8) ctx.rotate(-Math.PI / 2);
+      ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
+      src.width = src.height = 0;
+
+      const blob = await new Promise((res, rej) =>
+        dst.toBlob(b => b ? res(b) : rej(new Error("圖片太大，瀏覽器無法處理，請改選較小的尺寸")), "image/jpeg", q));
+      dst.width = dst.height = 0;
+      out.push(blob);
+      await tick();
+    }
+    if (!out.length) throw new Error("這個 TIF 裡沒有可讀取的影像");
+    return out;
+  }
+
+  // ---------- 畫面 ----------
+  function addCard(path, blob) {
+    const url = URL.createObjectURL(blob);
+    const d = document.createElement("div");
+    d.className = "item";
+    const shortName = path.split("/").pop();
+    d.innerHTML = `<img alt="" src="${url}"><div class="meta"><div class="name">${escapeHtml(path)}</div>
+      <div class="size">${fmt(blob.size)}</div><button class="btn ghost">下載這張</button></div>`;
+    d.querySelector("button").onclick = () => save(shortName, blob);
+    grid.appendChild(d);
+  }
+  function addErrorCard(path, msg) {
+    const d = document.createElement("div");
+    d.className = "item";
+    d.innerHTML = `<div class="meta"><div class="name">${escapeHtml(path)}</div><div class="err">轉換失敗：${escapeHtml(msg)}</div></div>`;
+    grid.appendChild(d);
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+  // ---------- 下載 ----------
+  dlZip.onclick = async () => {
+    if (!results.length) return;
+    dlZip.disabled = true; dlZip.textContent = "打包中…";
+    try {
+      const zip = new JSZip();
+      results.forEach(r => zip.file(r.path, r.blob));
+      const blob = await zip.generateAsync({ type: "blob", compression: "STORE" }); // JPG 已壓縮，直接存
+      await save("轉好的JPG.zip", blob);
+    } finally {
+      dlZip.disabled = false; dlZip.textContent = "⬇️ 全部下載（zip）";
+    }
+  };
+
+  async function save(filename, blob) {
+    if (downloads) {
+      try { await downloads.save({ filename, data: blob }); }
+      catch (e) {
+        if (e && e.code === "declined") return;
+        if (e && e.code === "rate_limited") { setStatus("請先處理畫面上的下載確認視窗，再試一次。", "err"); return; }
+        fallbackSave(filename, blob);
+      }
+    } else {
+      fallbackSave(filename, blob);
+    }
+  }
+  // 自己架站時（不在 Claude 裡）用一般下載方式
+  function fallbackSave(filename, blob) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+})();
+</script>
+</body>
+</html>
